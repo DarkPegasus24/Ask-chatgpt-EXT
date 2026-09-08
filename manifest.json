@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Ask ChatGPT",
+  "version": "1.1.0",
+  "description": "Right-click any selected text to instantly send and auto-submit prompts on ChatGPT.",
+  "permissions": [
+    "contextMenus",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["chatgpt_injector.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
