@@ -1,46 +1,50 @@
 /**
- * Ask ChatGPT Chrome Extension - ChatGPT Injector Script
+ * Ask AI Chrome Extension - ChatGPT Injector Script
  * 
  * Runs on https://chatgpt.com/ and https://chat.openai.com/
- * Automatically inputs the prompt into the ChatGPT chatbox and submits it (simulates Enter/Click Send).
- *
- * FIX (v1.2): Old version used a fixed setInterval (max ~15s) to wait for the
- * ChatGPT input box to appear, and a fixed 300ms delay before clicking Send.
- * On slow connections / cold page loads this caused the paste to silently
- * fail or take too long. This version:
- *   - Uses a MutationObserver so it reacts the instant the input box mounts,
- *     with a much longer safety timeout (30s) as backup.
- *   - Polls for the Send button to actually become enabled before clicking,
- *     instead of guessing a fixed delay.
- *   - Falls back to copying the text to clipboard + showing an on-screen
- *     toast ("Paste manually with Ctrl+V") if auto-fill still fails, so the
- *     user is never left stuck with nothing happening.
+ * Automatically inputs the formatted prompt into the ChatGPT chatbox and submits it.
  */
 
 (async () => {
-  // Check if there is a pending prompt in storage
-  const data = await chrome.storage.local.get(["pendingPrompt", "timestamp"]);
-  if (!data || !data.pendingPrompt) return;
+  const urlParams = new URLSearchParams(window.location.search);
+  const askId = urlParams.get("ask_id");
+  let promptText = null;
 
-  // Ignore prompts older than 2 minutes to prevent stale submissions
-  const isRecent = data.timestamp && (Date.now() - data.timestamp < 120000);
-  if (!isRecent) {
-    chrome.storage.local.remove(["pendingPrompt", "timestamp"]);
-    return;
+  // 1. First attempt: check for session-specific prompt using ask_id
+  if (askId) {
+    const storageKey = `pendingPrompt_${askId}`;
+    const storageItem = await chrome.storage.local.get([storageKey]);
+    if (storageItem && storageItem[storageKey]) {
+      const data = storageItem[storageKey];
+      if (data.timestamp && Date.now() - data.timestamp < 120000) {
+        promptText = data.text;
+      }
+      await chrome.storage.local.remove([storageKey]);
+    }
   }
 
-  const promptText = data.pendingPrompt;
+  // 2. Fallback: check standard pendingPrompt storage key
+  if (!promptText) {
+    const data = await chrome.storage.local.get(["pendingPrompt", "timestamp"]);
+    if (data && data.pendingPrompt) {
+      const isRecent = data.timestamp && (Date.now() - data.timestamp < 120000);
+      if (isRecent) {
+        promptText = data.pendingPrompt;
+      }
+      await chrome.storage.local.remove(["pendingPrompt", "timestamp"]);
+    }
+  }
 
-  // Clear storage immediately so future reloads won't trigger re-submission
-  await chrome.storage.local.remove(["pendingPrompt", "timestamp"]);
+  // If no valid recent prompt, exit silently
+  if (!promptText) return;
 
-  // Clean URL if it has auto_ask query param
+  // Clean URL query parameters so page reloads don't re-trigger injection
   if (window.location.search.includes("auto_ask")) {
     const cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState(null, "", cleanUrl);
   }
 
-  console.log("[Ask ChatGPT Extension] Auto-filling prompt:", promptText.substring(0, 40) + "...");
+  console.log("[Ask AI Extension] Auto-filling prompt:", promptText.substring(0, 50) + "...");
 
   /**
    * Helper to find the ChatGPT prompt input element
@@ -57,15 +61,6 @@
 
   /**
    * Helper to find the ChatGPT send/submit button.
-   *
-   * IMPORTANT: This must ONLY ever match the actual send/submit button.
-   * The old version had a broad fallback (`form button:not([disabled])`)
-   * that could accidentally match the mic/voice-mode button (which sits
-   * where the send button will appear, and is enabled even when the send
-   * button is still disabled). Clicking that button "succeeds" silently
-   * but never sends the message - which is why Enter/submit appeared to
-   * do nothing. So we now ONLY match buttons that clearly identify
-   * themselves as the send button, via data-testid or aria-label.
    */
   function findSendButton() {
     const candidates = [
@@ -104,8 +99,7 @@
   }
 
   /**
-   * Shows a small toast in the corner of the screen (used only for the
-   * clipboard-fallback path, when auto-fill/auto-submit couldn't complete).
+   * Shows a small toast in the corner of the screen
    */
   function showFallbackToast(message) {
     const toast = document.createElement("div");
@@ -116,13 +110,15 @@
       right: "24px",
       background: "#1f2937",
       color: "#fff",
-      padding: "12px 16px",
+      padding: "12px 18px",
       borderRadius: "8px",
-      fontFamily: "sans-serif",
+      fontFamily: "system-ui, -apple-system, sans-serif",
       fontSize: "14px",
+      fontWeight: "500",
       zIndex: 2147483647,
-      boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-      maxWidth: "300px"
+      boxShadow: "0 8px 24px rgba(0,0,0,0.3)",
+      maxWidth: "340px",
+      border: "1px solid #374151"
     });
     document.body.appendChild(toast);
     setTimeout(() => toast.remove(), 6000);
@@ -136,14 +132,12 @@
       await navigator.clipboard.writeText(text);
       showFallbackToast("Couldn't auto-fill ChatGPT. Your text is copied — press Ctrl+V to paste it.");
     } catch (e) {
-      console.warn("[Ask ChatGPT Extension] Clipboard fallback also failed:", e);
+      console.warn("[Ask AI Extension] Clipboard fallback failed:", e);
     }
   }
 
   /**
-   * Waits until the Send button exists AND is enabled (not disabled),
-   * polling instead of guessing a fixed delay. Resolves with the button,
-   * or null if it times out.
+   * Waits until the Send button exists AND is enabled
    */
   function waitForSendButtonEnabled(timeoutMs = 5000) {
     return new Promise((resolve) => {
@@ -155,7 +149,7 @@
           return;
         }
         if (Date.now() - start >= timeoutMs) {
-          resolve(btn || null); // return whatever we have, even if still disabled
+          resolve(btn || null);
           return;
         }
         setTimeout(check, 150);
@@ -165,8 +159,7 @@
   }
 
   /**
-   * Returns true if the prompt box is now empty (a good signal that the
-   * message was actually sent, since ChatGPT clears the input on submit).
+   * Returns true if the prompt box is now empty
    */
   function isInputCleared(element) {
     const text =
@@ -177,10 +170,7 @@
   }
 
   /**
-   * Dispatches a full, realistic Enter keypress (keydown + keypress + keyup)
-   * on the given element. ChatGPT's submit-on-Enter handler listens for
-   * keydown, but sending all three makes this behave like a real keystroke
-   * and is more reliable across UI versions.
+   * Dispatches Enter key sequence
    */
   function dispatchRealEnterKey(element) {
     const eventInit = {
@@ -198,59 +188,51 @@
   }
 
   /**
-   * Submits the prompt by clicking the Send button (after waiting for it to
-   * be enabled), then VERIFIES the message actually went through by
-   * checking whether the input box got cleared. If not, it retries with a
-   * real Enter keypress. If that also fails, it falls back to copying the
-   * text to the clipboard so the user can paste + hit Enter manually.
+   * Submits the prompt
    */
   async function submitPrompt(element, originalText) {
     // Attempt 1: click the (verified) send button
     const sendButton = await waitForSendButtonEnabled(5000);
     if (sendButton && !sendButton.disabled) {
       sendButton.click();
-      console.log("[Ask ChatGPT Extension] Clicked send button!");
+      console.log("[Ask AI Extension] Clicked send button!");
     }
 
     await new Promise((r) => setTimeout(r, 500));
     if (isInputCleared(element)) {
-      console.log("[Ask ChatGPT Extension] Message sent successfully (click).");
+      console.log("[Ask AI Extension] Message sent successfully (click).");
       return true;
     }
 
     // Attempt 2: real Enter keypress sequence
     dispatchRealEnterKey(element);
-    console.log("[Ask ChatGPT Extension] Dispatched Enter key sequence (fallback).");
+    console.log("[Ask AI Extension] Dispatched Enter key sequence (fallback).");
 
     await new Promise((r) => setTimeout(r, 500));
     if (isInputCleared(element)) {
-      console.log("[Ask ChatGPT Extension] Message sent successfully (Enter key).");
+      console.log("[Ask AI Extension] Message sent successfully (Enter key).");
       return true;
     }
 
-    // Attempt 3: give it one more short window in case send button was
-    // still finishing enabling, then try clicking again.
+    // Attempt 3: retry send button click
     const retryButton = await waitForSendButtonEnabled(3000);
     if (retryButton && !retryButton.disabled) {
       retryButton.click();
       await new Promise((r) => setTimeout(r, 500));
       if (isInputCleared(element)) {
-        console.log("[Ask ChatGPT Extension] Message sent successfully (retry click).");
+        console.log("[Ask AI Extension] Message sent successfully (retry click).");
         return true;
       }
     }
 
-    // Everything failed - text is still typed in the box, but not sent.
-    // Let the user know they just need to press Enter themselves.
-    console.warn("[Ask ChatGPT Extension] Could not auto-submit. Text is in the box, waiting for manual Enter.");
-    showFallbackToast("Text is ready in the box - press Enter to send it.");
+    // Fallback: leave text typed and inform user
+    console.warn("[Ask AI Extension] Prompt typed into box. Press Enter to submit.");
+    showFallbackToast("Prompt ready in box! Press Enter to send.");
     return false;
   }
 
   /**
-   * Waits for the ChatGPT prompt input box to mount in the DOM.
-   * Uses MutationObserver (reacts instantly) with a generous 30s safety
-   * timeout as backup for very slow page loads.
+   * Waits for the ChatGPT prompt input box to mount
    */
   function waitForPromptElement(timeoutMs = 30000) {
     return new Promise((resolve) => {
@@ -281,24 +263,24 @@
   const promptElement = await waitForPromptElement(30000);
 
   if (!promptElement) {
-    console.warn("[Ask ChatGPT Extension] Timeout waiting for ChatGPT prompt box.");
+    console.warn("[Ask AI Extension] Timeout waiting for ChatGPT prompt box.");
     await copyToClipboardFallback(promptText);
     return;
   }
 
-  // Small delay to let React fully mount/hydrate the element before typing
+  // Small delay to let React fully hydrate before typing
   await new Promise((r) => setTimeout(r, 400));
 
   insertPrompt(promptElement, promptText);
 
-  // Verify the text actually landed; if not, use clipboard fallback
+  // Verify insertion
   const textLanded =
     promptElement.tagName.toLowerCase() === "textarea"
       ? promptElement.value.trim().length > 0
       : promptElement.textContent.trim().length > 0;
 
   if (!textLanded) {
-    console.warn("[Ask ChatGPT Extension] Insert failed, falling back to clipboard.");
+    console.warn("[Ask AI Extension] Insert failed, falling back to clipboard.");
     await copyToClipboardFallback(promptText);
     return;
   }
